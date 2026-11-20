@@ -1621,61 +1621,69 @@ QRect MainWindow::getDesktopGeometry()
         return m_availableScreenRect.isValid() ? m_availableScreenRect : screenGeometry;
     }
 
-    if (m_outputOrderWatcher->outputOrder().count() > 1) {
-        const QList<WId> allWindows = KX11Extras::windows();
-        QList<WId> offScreenWindows;
+#if HAVE_X11
+    // On X11 (KDE, XFCE, etc.) do not rely on QScreen::availableGeometry() or
+    // the global _NET_WORKAREA.
+    //
+    // Qt's availableGeometry() only works when the WM correctly publishes
+    // _NET_WORKAREA and even then only reliably on single-monitor setups.
+    // On XFCE (and some Plasma X11 configurations) it simply returns the full
+    // screen geometry, which makes a 100% height window go behind the panel.
+    //
+    // Instead we inspect every window's _NET_WM_STRUT_PARTIAL /
+    // extended strut and shrink the screen rectangle ourselves. This matches
+    // the historical behaviour that used to keep the Yakuake window above
+    // the taskbar.
 
-        QListIterator<WId> i(allWindows);
+    int left = 0;
+    int right = 0;
+    int top = 0;
+    int bottom = 0;
 
-        while (i.hasNext()) {
-            WId windowId = i.next();
+    const QList<WId> allWindows = KX11Extras::windows();
+    for (WId windowId : allWindows) {
+        if (!KX11Extras::hasWId(windowId))
+            continue;
 
-            if (KX11Extras::hasWId(windowId)) {
-                KWindowInfo windowInfo = KWindowInfo(windowId, NET::WMDesktop | NET::WMGeometry, NET::WM2ExtendedStrut);
+        KWindowInfo windowInfo(windowId, NET::WMDesktop | NET::WMGeometry, NET::WM2ExtendedStrut);
+        if (!windowInfo.valid() || !windowInfo.isOnCurrentDesktop())
+            continue;
 
-                // If windowInfo is valid and the window is located at the same (current)
-                // desktop with the yakuake window...
-                if (windowInfo.valid() && windowInfo.isOnCurrentDesktop()) {
-                    NETExtendedStrut strut = windowInfo.extendedStrut();
+        const NETExtendedStrut strut = windowInfo.extendedStrut();
 
-                    // Get the area covered by each strut.
-                    QRect topStrut(strut.top_start, 0, strut.top_end - strut.top_start, strut.top_width);
-                    QRect bottomStrut(strut.bottom_start,
-                                      screenGeometry.bottom() - strut.bottom_width,
-                                      strut.bottom_end - strut.bottom_start,
-                                      strut.bottom_width);
-                    QRect leftStrut(0, strut.left_start, strut.left_width, strut.left_end - strut.left_start);
-                    QRect rightStrut(screenGeometry.right() - strut.right_width, strut.right_start, strut.right_width, strut.right_end - strut.right_start);
+        // Build the four strut rectangles in root coordinates.
+        // A zero-width/height strut is empty and is ignored.
+        const QRect topStrut(strut.top_start, 0, qMax(0, strut.top_end - strut.top_start), strut.top_width);
+        const QRect bottomStrut(strut.bottom_start,
+                                screenGeometry.bottom() - strut.bottom_width + 1,
+                                qMax(0, strut.bottom_end - strut.bottom_start),
+                                strut.bottom_width);
+        const QRect leftStrut(0, strut.left_start, strut.left_width, qMax(0, strut.left_end - strut.left_start));
+        const QRect rightStrut(screenGeometry.right() - strut.right_width + 1,
+                               strut.right_start,
+                               strut.right_width,
+                               qMax(0, strut.right_end - strut.right_start));
 
-                    // If the window has no strut, no need to bother further.
-                    if (topStrut.isEmpty() && bottomStrut.isEmpty() && leftStrut.isEmpty() && rightStrut.isEmpty())
-                        continue;
-
-                    // If any of the strut and the window itself intersects with our screen geometry,
-                    // it will be correctly handled by workArea(). If the window doesn't intersect
-                    // with our screen geometry it's most likely a plasma panel and can/should be
-                    // ignored
-                    if ((topStrut.intersects(screenGeometry) || bottomStrut.intersects(screenGeometry) || leftStrut.intersects(screenGeometry)
-                         || rightStrut.intersects(screenGeometry))
-                        && windowInfo.geometry().intersects(screenGeometry)) {
-                        continue;
-                    }
-
-                    // This window has a strut on the same desktop as us but which does not cover our screen
-                    // geometry. It should be ignored, otherwise the returned work area will wrongly include
-                    // the strut.
-                    offScreenWindows << windowId;
-                }
-            }
-        }
-
-        return KX11Extras::workArea(offScreenWindows).intersected(screenGeometry);
+        // Only consider struts that actually intersect our screen.
+        // This correctly ignores panels that live on other monitors.
+        if (topStrut.intersects(screenGeometry) && strut.top_width > 0)
+            top = qMax(top, strut.top_width);
+        if (bottomStrut.intersects(screenGeometry) && strut.bottom_width > 0)
+            bottom = qMax(bottom, strut.bottom_width);
+        if (leftStrut.intersects(screenGeometry) && strut.left_width > 0)
+            left = qMax(left, strut.left_width);
+        if (rightStrut.intersects(screenGeometry) && strut.right_width > 0)
+            right = qMax(right, strut.right_width);
     }
 
-#if HAVE_X11
-    return KX11Extras::workArea();
+    QRect available = screenGeometry.adjusted(left, top, -right, -bottom);
+    if (available.isValid() && !available.isEmpty())
+        return available;
+
+    // Absolute last resort
+    return KX11Extras::workArea().intersected(screenGeometry);
 #else
-    return QRect();
+    return screenGeometry;
 #endif
 }
 
