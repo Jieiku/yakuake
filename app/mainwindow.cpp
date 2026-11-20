@@ -938,12 +938,35 @@ void MainWindow::applySettings()
     } else if (Settings::showSystrayIcon() && !m_notifierItem) {
         m_notifierItem = new KStatusNotifierItem(this);
         m_notifierItem->setStandardActionsEnabled(false);
-        m_notifierItem->setIconByName(QStringLiteral("yakuake-symbolic"));
+
+        // On Plasma we prefer the symbolic (monochrome) icon.
+        // Everywhere else we force the regular coloured icon so XFCE
+        // and similar hosts never show a blank or wrong-looking icon.
+        const bool preferSymbolic = qEnvironmentVariableIsSet("KDE_FULL_SESSION")
+            || qEnvironmentVariable("XDG_CURRENT_DESKTOP").contains(QLatin1String("KDE"), Qt::CaseInsensitive)
+            || qEnvironmentVariable("XDG_CURRENT_DESKTOP").contains(QLatin1String("Plasma"), Qt::CaseInsensitive);
+
+        const QString iconName =
+            (preferSymbolic && QIcon::hasThemeIcon(QStringLiteral("yakuake-symbolic"))) ? QStringLiteral("yakuake-symbolic") : QStringLiteral("yakuake");
+
+        m_notifierItem->setIconByName(iconName);
+
+        // Always supply a pixmap as well. Plasma will still prefer the name
+        // (and therefore keep symbolic styling). XFCE needs the pixmap.
+        QIcon icon = QIcon::fromTheme(iconName);
+        if (icon.isNull()) {
+            icon = QIcon::fromTheme(QStringLiteral("yakuake"));
+        }
+        if (icon.isNull()) {
+            icon = QIcon(QStringLiteral("/usr/share/icons/hicolor/32x32/apps/yakuake.png"));
+        }
+        if (!icon.isNull()) {
+            m_notifierItem->setIconByPixmap(icon);
+        }
+
         m_notifierItem->setStatus(KStatusNotifierItem::Active);
         m_notifierItem->setContextMenu(m_menu);
 
-        // Prevent the default implementation of showing
-        // and instead run toggleWindowState
         m_notifierItem->setAssociatedWindow(nullptr);
         connect(m_notifierItem, &KStatusNotifierItem::activateRequested, this, &MainWindow::toggleWindowState);
         updateTrayTooltip();
@@ -1738,10 +1761,21 @@ void MainWindow::updateTrayTooltip()
 
     auto *action = actionCollection()->action(QStringLiteral("toggle-window-state"));
     const QList<QKeySequence> &shortcuts = KGlobalAccel::self()->shortcut(action);
+
+    const QString title = QStringLiteral("Yakuake");
+    QString subTitle;
+
     if (!shortcuts.isEmpty()) {
-        const QString shortcut(shortcuts.first().toString(QKeySequence::NativeText));
-        m_notifierItem->setToolTip(QStringLiteral("yakuake"), QStringLiteral("Yakuake"), xi18nc("@info", "Press <shortcut>%1</shortcut> to open", shortcut));
+        // Plain text only – no markup of any kind.
+        // XFCE’s StatusNotifier host breaks when it sees <html> or <shortcut>.
+        const QString shortcut = shortcuts.first().toString(QKeySequence::NativeText);
+        subTitle = QStringLiteral("Press %1 to open").arg(shortcut);
+    } else {
+        subTitle = QStringLiteral("Click to open/retract");
     }
+
+    m_notifierItem->setToolTip(QStringLiteral("yakuake"), title, subTitle);
+    m_notifierItem->setTitle(title);
 }
 
 #include "moc_mainwindow.cpp"
